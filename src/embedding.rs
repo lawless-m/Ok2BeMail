@@ -164,3 +164,201 @@ pub fn find_similar_emails<'a>(
 
     scored.into_iter().take(k).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Email, EmailWithLabel, Label};
+    use chrono::Utc;
+
+    fn make_test_email(id: &str, subject: &str, sender: &str, embedding: Option<Vec<f32>>) -> Email {
+        Email {
+            id: id.to_string(),
+            subject: Some(subject.to_string()),
+            body_text: Some("Test body".to_string()),
+            body_html: None,
+            sender_address: sender.to_string(),
+            sender_name: Some("Test Sender".to_string()),
+            received_at: Utc::now(),
+            folder_id: None,
+            has_attachments: false,
+            is_read: false,
+            importance: None,
+            fetched_at: Utc::now(),
+            embedding,
+        }
+    }
+
+    fn make_test_label(email_id: &str, category: &str, importance: i32) -> Label {
+        Label {
+            email_id: email_id.to_string(),
+            category: category.to_string(),
+            importance,
+            source: "user".to_string(),
+            confidence: Some(0.9),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let similarity = cosine_similarity(&a, &b);
+        assert!((similarity - 1.0).abs() < 0.0001, "Identical vectors should have similarity 1.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let similarity = cosine_similarity(&a, &b);
+        assert!((similarity - 0.0).abs() < 0.0001, "Orthogonal vectors should have similarity 0.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_opposite_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![-1.0, 0.0, 0.0];
+        let similarity = cosine_similarity(&a, &b);
+        assert!((similarity - (-1.0)).abs() < 0.0001, "Opposite vectors should have similarity -1.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_different_lengths() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0];
+        let similarity = cosine_similarity(&a, &b);
+        assert_eq!(similarity, 0.0, "Different length vectors should return 0.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let similarity = cosine_similarity(&a, &b);
+        assert_eq!(similarity, 0.0, "Zero vector should return 0.0");
+    }
+
+    #[test]
+    fn test_cosine_similarity_normalized_vectors() {
+        // Two vectors at 45 degree angle
+        let a = vec![1.0, 0.0];
+        let b = vec![0.707107, 0.707107]; // Normalized 45-degree vector
+        let similarity = cosine_similarity(&a, &b);
+        assert!((similarity - 0.707107).abs() < 0.001, "Expected ~0.707 for 45 degree angle");
+    }
+
+    #[test]
+    fn test_format_email_for_embedding_complete() {
+        let email = make_test_email("1", "Test Subject", "test@example.com", None);
+        let formatted = EmbeddingService::format_email_for_embedding(&email);
+
+        assert!(formatted.contains("From: Test Sender <test@example.com>"));
+        assert!(formatted.contains("Subject: Test Subject"));
+        assert!(formatted.contains("Test body"));
+    }
+
+    #[test]
+    fn test_format_email_for_embedding_no_sender_name() {
+        let mut email = make_test_email("1", "Test Subject", "test@example.com", None);
+        email.sender_name = None;
+        let formatted = EmbeddingService::format_email_for_embedding(&email);
+
+        assert!(formatted.contains("From:  <test@example.com>"));
+    }
+
+    #[test]
+    fn test_format_email_for_embedding_no_subject() {
+        let mut email = make_test_email("1", "Test Subject", "test@example.com", None);
+        email.subject = None;
+        let formatted = EmbeddingService::format_email_for_embedding(&email);
+
+        assert!(formatted.contains("Subject: (no subject)"));
+    }
+
+    #[test]
+    fn test_format_email_for_embedding_no_body() {
+        let mut email = make_test_email("1", "Test Subject", "test@example.com", None);
+        email.body_text = None;
+        let formatted = EmbeddingService::format_email_for_embedding(&email);
+
+        // Should still contain the header parts
+        assert!(formatted.contains("From:"));
+        assert!(formatted.contains("Subject:"));
+    }
+
+    #[test]
+    fn test_find_similar_emails_returns_top_k() {
+        let target = vec![1.0, 0.0, 0.0];
+
+        let candidates = vec![
+            EmailWithLabel {
+                email: make_test_email("1", "Subject 1", "a@example.com", Some(vec![1.0, 0.0, 0.0])),
+                label: Some(make_test_label("1", "internal", 2)),
+            },
+            EmailWithLabel {
+                email: make_test_email("2", "Subject 2", "b@example.com", Some(vec![0.9, 0.1, 0.0])),
+                label: Some(make_test_label("2", "external", 1)),
+            },
+            EmailWithLabel {
+                email: make_test_email("3", "Subject 3", "c@example.com", Some(vec![0.0, 1.0, 0.0])),
+                label: Some(make_test_label("3", "junk", 0)),
+            },
+        ];
+
+        let results = find_similar_emails(&target, &candidates, 2);
+
+        assert_eq!(results.len(), 2, "Should return exactly k results");
+        assert_eq!(results[0].0.email.id, "1", "Most similar should be first");
+        assert_eq!(results[1].0.email.id, "2", "Second most similar should be second");
+    }
+
+    #[test]
+    fn test_find_similar_emails_skips_no_embedding() {
+        let target = vec![1.0, 0.0, 0.0];
+
+        let candidates = vec![
+            EmailWithLabel {
+                email: make_test_email("1", "Subject 1", "a@example.com", Some(vec![1.0, 0.0, 0.0])),
+                label: Some(make_test_label("1", "internal", 2)),
+            },
+            EmailWithLabel {
+                email: make_test_email("2", "Subject 2", "b@example.com", None), // No embedding
+                label: Some(make_test_label("2", "external", 1)),
+            },
+        ];
+
+        let results = find_similar_emails(&target, &candidates, 5);
+
+        assert_eq!(results.len(), 1, "Should skip emails without embeddings");
+        assert_eq!(results[0].0.email.id, "1");
+    }
+
+    #[test]
+    fn test_find_similar_emails_empty_candidates() {
+        let target = vec![1.0, 0.0, 0.0];
+        let candidates: Vec<EmailWithLabel> = vec![];
+
+        let results = find_similar_emails(&target, &candidates, 5);
+
+        assert!(results.is_empty(), "Empty candidates should return empty results");
+    }
+
+    #[test]
+    fn test_find_similar_emails_k_larger_than_candidates() {
+        let target = vec![1.0, 0.0, 0.0];
+
+        let candidates = vec![
+            EmailWithLabel {
+                email: make_test_email("1", "Subject 1", "a@example.com", Some(vec![1.0, 0.0, 0.0])),
+                label: Some(make_test_label("1", "internal", 2)),
+            },
+        ];
+
+        let results = find_similar_emails(&target, &candidates, 10);
+
+        assert_eq!(results.len(), 1, "Should return all available when k > candidates");
+    }
+}

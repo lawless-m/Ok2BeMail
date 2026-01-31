@@ -264,3 +264,256 @@ impl Classifier {
         Ok(count)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ClassifierConfig, Config, OllamaConfig};
+    use crate::db::{Email, EmailWithLabel, Label};
+    use chrono::Utc;
+
+    fn make_test_config() -> Config {
+        Config {
+            ollama: OllamaConfig {
+                base_url: "http://localhost:11434".to_string(),
+                embed_model: "nomic-embed-text".to_string(),
+                classify_model: "qwen2.5:7b".to_string(),
+            },
+            classifier: ClassifierConfig {
+                similar_count: 5,
+                min_confidence: 0.7,
+            },
+            ..Config::default()
+        }
+    }
+
+    fn make_test_email(id: &str, subject: &str, sender: &str, body: &str) -> Email {
+        Email {
+            id: id.to_string(),
+            subject: Some(subject.to_string()),
+            body_text: Some(body.to_string()),
+            body_html: None,
+            sender_address: sender.to_string(),
+            sender_name: Some("Test Sender".to_string()),
+            received_at: Utc::now(),
+            folder_id: None,
+            has_attachments: false,
+            is_read: false,
+            importance: None,
+            fetched_at: Utc::now(),
+            embedding: None,
+        }
+    }
+
+    fn make_test_label(email_id: &str, category: &str, importance: i32) -> Label {
+        Label {
+            email_id: email_id.to_string(),
+            category: category.to_string(),
+            importance,
+            source: "user".to_string(),
+            confidence: Some(0.9),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_classifier_creation() {
+        let config = make_test_config();
+        let classifier = Classifier::new(&config);
+
+        assert_eq!(classifier.base_url, "http://localhost:11434");
+        assert_eq!(classifier.model, "qwen2.5:7b");
+        assert_eq!(classifier.similar_count, 5);
+        assert!((classifier.min_confidence - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_build_prompt_no_examples() {
+        let config = make_test_config();
+        let classifier = Classifier::new(&config);
+        let email = make_test_email("e1", "Test Subject", "test@example.com", "Test body content");
+
+        let examples: Vec<(&EmailWithLabel, f32)> = vec![];
+        let prompt = classifier.build_prompt(&email, &examples);
+
+        // Should contain system prompt
+        assert!(prompt.contains("You are an email classifier"));
+        assert!(prompt.contains("Categories:"));
+        assert!(prompt.contains("Importance levels:"));
+
+        // Should contain email details
+        assert!(prompt.contains("Test Sender <test@example.com>"));
+        assert!(prompt.contains("Subject: Test Subject"));
+        assert!(prompt.contains("Test body content"));
+
+        // Should NOT contain examples section header
+        assert!(!prompt.contains("Examples of previously classified emails:"));
+
+        // Should contain response format
+        assert!(prompt.contains("Respond with JSON only:"));
+    }
+
+    #[test]
+    fn test_build_prompt_with_examples() {
+        let config = make_test_config();
+        let classifier = Classifier::new(&config);
+        let email = make_test_email("e1", "New Email", "new@example.com", "New body");
+
+        let example_email = make_test_email("ex1", "Example Subject", "example@company.com", "Example body");
+        let example_label = make_test_label("ex1", "internal", 2);
+        let example = EmailWithLabel {
+            email: example_email,
+            label: Some(example_label),
+        };
+
+        let examples: Vec<(&EmailWithLabel, f32)> = vec![(&example, 0.85)];
+        let prompt = classifier.build_prompt(&email, &examples);
+
+        // Should contain examples section
+        assert!(prompt.contains("Examples of previously classified emails:"));
+
+        // Should contain example details
+        assert!(prompt.contains("example@company.com"));
+        assert!(prompt.contains("Example Subject"));
+        assert!(prompt.contains("Category: internal"));
+        assert!(prompt.contains("Importance: 2"));
+        assert!(prompt.contains("similarity: 0.85"));
+    }
+
+    #[test]
+    fn test_build_prompt_truncates_long_body() {
+        let config = make_test_config();
+        let classifier = Classifier::new(&config);
+
+        // Create a very long body (> 2000 chars)
+        let long_body = "A".repeat(3000);
+        let email = make_test_email("e1", "Long Body Email", "long@example.com", &long_body);
+
+        let examples: Vec<(&EmailWithLabel, f32)> = vec![];
+        let prompt = classifier.build_prompt(&email, &examples);
+
+        // Should contain truncated body with "..."
+        assert!(prompt.contains("..."));
+        // Should not contain the full body
+        assert!(!prompt.contains(&"A".repeat(3000)));
+    }
+
+    #[test]
+    fn test_build_prompt_handles_missing_subject() {
+        let config = make_test_config();
+        let classifier = Classifier::new(&config);
+
+        let mut email = make_test_email("e1", "Placeholder", "test@example.com", "Body");
+        email.subject = None;
+
+        let examples: Vec<(&EmailWithLabel, f32)> = vec![];
+        let prompt = classifier.build_prompt(&email, &examples);
+
+        assert!(prompt.contains("Subject: (no subject)"));
+    }
+
+    #[test]
+    fn test_build_prompt_handles_missing_sender_name() {
+        let config = make_test_config();
+        let classifier = Classifier::new(&config);
+
+        let mut email = make_test_email("e1", "Subject", "test@example.com", "Body");
+        email.sender_name = None;
+
+        let examples: Vec<(&EmailWithLabel, f32)> = vec![];
+        let prompt = classifier.build_prompt(&email, &examples);
+
+        assert!(prompt.contains("From:  <test@example.com>"));
+    }
+
+    #[test]
+    fn test_classification_result_parsing() {
+        // Test parsing of valid JSON response
+        let json = r#"{"category": "external", "importance": 3, "reason": "Email from outside organization"}"#;
+        let result: ClassificationResult = serde_json::from_str(json).expect("Failed to parse");
+
+        assert_eq!(result.category, "external");
+        assert_eq!(result.importance, 3);
+        assert_eq!(result.reason, Some("Email from outside organization".to_string()));
+    }
+
+    #[test]
+    fn test_classification_result_parsing_without_reason() {
+        let json = r#"{"category": "junk", "importance": 0}"#;
+        let result: ClassificationResult = serde_json::from_str(json).expect("Failed to parse");
+
+        assert_eq!(result.category, "junk");
+        assert_eq!(result.importance, 0);
+        assert!(result.reason.is_none());
+    }
+
+    #[test]
+    fn test_classification_result_parsing_all_categories() {
+        let categories = ["hr", "system_alert", "system_ok", "external", "internal", "junk"];
+
+        for cat in categories {
+            let json = format!(r#"{{"category": "{}", "importance": 2}}"#, cat);
+            let result: ClassificationResult = serde_json::from_str(&json).expect("Failed to parse");
+            assert_eq!(result.category, cat);
+        }
+    }
+
+    #[test]
+    fn test_classification_result_importance_range() {
+        // Test various importance values
+        for importance in 0..=4 {
+            let json = format!(r#"{{"category": "internal", "importance": {}}}"#, importance);
+            let result: ClassificationResult = serde_json::from_str(&json).expect("Failed to parse");
+            assert_eq!(result.importance, importance);
+        }
+    }
+
+    #[test]
+    fn test_system_prompt_contains_all_categories() {
+        assert!(SYSTEM_PROMPT.contains("hr:"));
+        assert!(SYSTEM_PROMPT.contains("system_alert:"));
+        assert!(SYSTEM_PROMPT.contains("system_ok:"));
+        assert!(SYSTEM_PROMPT.contains("external:"));
+        assert!(SYSTEM_PROMPT.contains("internal:"));
+        assert!(SYSTEM_PROMPT.contains("junk:"));
+    }
+
+    #[test]
+    fn test_system_prompt_contains_importance_levels() {
+        assert!(SYSTEM_PROMPT.contains("- 0:"));
+        assert!(SYSTEM_PROMPT.contains("- 1:"));
+        assert!(SYSTEM_PROMPT.contains("- 2:"));
+        assert!(SYSTEM_PROMPT.contains("- 3:"));
+        assert!(SYSTEM_PROMPT.contains("- 4:"));
+    }
+
+    #[test]
+    fn test_build_prompt_multiple_examples() {
+        let config = make_test_config();
+        let classifier = Classifier::new(&config);
+        let email = make_test_email("new", "New Email", "new@example.com", "New body");
+
+        let example1 = EmailWithLabel {
+            email: make_test_email("ex1", "HR Update", "hr@company.com", "Policy update"),
+            label: Some(make_test_label("ex1", "hr", 2)),
+        };
+
+        let example2 = EmailWithLabel {
+            email: make_test_email("ex2", "Alert: Server Down", "alert@monitoring.com", "Server is down"),
+            label: Some(make_test_label("ex2", "system_alert", 4)),
+        };
+
+        let examples: Vec<(&EmailWithLabel, f32)> = vec![(&example1, 0.9), (&example2, 0.75)];
+        let prompt = classifier.build_prompt(&email, &examples);
+
+        // Should contain both examples
+        assert!(prompt.contains("hr@company.com"));
+        assert!(prompt.contains("HR Update"));
+        assert!(prompt.contains("Category: hr"));
+
+        assert!(prompt.contains("alert@monitoring.com"));
+        assert!(prompt.contains("Alert: Server Down"));
+        assert!(prompt.contains("Category: system_alert"));
+    }
+}

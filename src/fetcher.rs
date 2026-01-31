@@ -288,3 +288,257 @@ fn convert_graph_message(msg: GraphMessage) -> Result<Email> {
         embedding: None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Datelike;
+
+    fn create_basic_graph_message() -> GraphMessage {
+        GraphMessage {
+            id: "msg-12345".to_string(),
+            subject: Some("Test Subject".to_string()),
+            body_preview: Some("Preview text...".to_string()),
+            body: Some(MessageBody {
+                content: Some("Full body text".to_string()),
+                content_type: Some("text".to_string()),
+            }),
+            from: Some(EmailRecipient {
+                email_address: EmailAddress {
+                    address: "sender@example.com".to_string(),
+                    name: Some("Test Sender".to_string()),
+                },
+            }),
+            received_date_time: "2025-01-15T10:30:00Z".to_string(),
+            parent_folder_id: Some("inbox".to_string()),
+            has_attachments: Some(false),
+            is_read: Some(true),
+            importance: Some("normal".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_convert_basic_message() {
+        let msg = create_basic_graph_message();
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert_eq!(email.id, "msg-12345");
+        assert_eq!(email.subject, Some("Test Subject".to_string()));
+        assert_eq!(email.sender_address, "sender@example.com");
+        assert_eq!(email.sender_name, Some("Test Sender".to_string()));
+        assert_eq!(email.folder_id, Some("inbox".to_string()));
+        assert!(!email.has_attachments);
+        assert!(email.is_read);
+        assert_eq!(email.importance, Some("normal".to_string()));
+    }
+
+    #[test]
+    fn test_convert_message_text_body() {
+        let msg = create_basic_graph_message();
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert_eq!(email.body_text, Some("Full body text".to_string()));
+        assert!(email.body_html.is_none());
+    }
+
+    #[test]
+    fn test_convert_message_html_body() {
+        let mut msg = create_basic_graph_message();
+        msg.body = Some(MessageBody {
+            content: Some("<p>Hello <b>World</b></p>".to_string()),
+            content_type: Some("html".to_string()),
+        });
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        // HTML should be stored in body_html
+        assert_eq!(email.body_html, Some("<p>Hello <b>World</b></p>".to_string()));
+        // body_text should be extracted from HTML
+        assert!(email.body_text.is_some());
+        let body_text = email.body_text.unwrap();
+        assert!(body_text.contains("Hello"));
+        assert!(body_text.contains("World"));
+    }
+
+    #[test]
+    fn test_convert_message_no_body_uses_preview() {
+        let mut msg = create_basic_graph_message();
+        msg.body = None;
+        msg.body_preview = Some("This is the preview".to_string());
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert_eq!(email.body_text, Some("This is the preview".to_string()));
+        assert!(email.body_html.is_none());
+    }
+
+    #[test]
+    fn test_convert_message_no_sender() {
+        let mut msg = create_basic_graph_message();
+        msg.from = None;
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert_eq!(email.sender_address, "unknown@unknown");
+        assert!(email.sender_name.is_none());
+    }
+
+    #[test]
+    fn test_convert_message_sender_no_name() {
+        let mut msg = create_basic_graph_message();
+        msg.from = Some(EmailRecipient {
+            email_address: EmailAddress {
+                address: "noname@example.com".to_string(),
+                name: None,
+            },
+        });
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert_eq!(email.sender_address, "noname@example.com");
+        assert!(email.sender_name.is_none());
+    }
+
+    #[test]
+    fn test_convert_message_with_attachments() {
+        let mut msg = create_basic_graph_message();
+        msg.has_attachments = Some(true);
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert!(email.has_attachments);
+    }
+
+    #[test]
+    fn test_convert_message_unread() {
+        let mut msg = create_basic_graph_message();
+        msg.is_read = Some(false);
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert!(!email.is_read);
+    }
+
+    #[test]
+    fn test_convert_message_no_subject() {
+        let mut msg = create_basic_graph_message();
+        msg.subject = None;
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert!(email.subject.is_none());
+    }
+
+    #[test]
+    fn test_convert_message_invalid_date() {
+        let mut msg = create_basic_graph_message();
+        msg.received_date_time = "invalid-date".to_string();
+
+        let result = convert_graph_message(msg);
+
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(err_str.contains("Invalid date format"));
+    }
+
+    #[test]
+    fn test_convert_message_various_date_formats() {
+        let dates = [
+            "2025-01-15T10:30:00Z",
+            "2025-01-15T10:30:00+00:00",
+            "2025-06-20T15:45:30.123Z",
+        ];
+
+        for date in dates {
+            let mut msg = create_basic_graph_message();
+            msg.received_date_time = date.to_string();
+
+            let email = convert_graph_message(msg).expect(&format!("Failed to parse date: {}", date));
+            assert!(email.received_at.year() >= 2025);
+        }
+    }
+
+    #[test]
+    fn test_convert_message_high_importance() {
+        let mut msg = create_basic_graph_message();
+        msg.importance = Some("high".to_string());
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        assert_eq!(email.importance, Some("high".to_string()));
+    }
+
+    #[test]
+    fn test_convert_message_defaults_when_optional_none() {
+        let mut msg = create_basic_graph_message();
+        msg.has_attachments = None;
+        msg.is_read = None;
+        msg.importance = None;
+
+        let email = convert_graph_message(msg).expect("Failed to convert message");
+
+        // Should use default values
+        assert!(!email.has_attachments);
+        assert!(!email.is_read);
+        assert!(email.importance.is_none());
+    }
+
+    #[test]
+    fn test_graph_response_deserialization() {
+        let json = r#"{
+            "value": [
+                {
+                    "id": "msg-1",
+                    "subject": "Test",
+                    "receivedDateTime": "2025-01-15T10:30:00Z"
+                }
+            ],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/me/messages?$skip=50",
+            "@odata.deltaLink": null
+        }"#;
+
+        let response: GraphResponse<GraphMessage> = serde_json::from_str(json).expect("Failed to parse");
+        assert_eq!(response.value.len(), 1);
+        assert_eq!(response.value[0].id, "msg-1");
+        assert!(response.next_link.is_some());
+        assert!(response.delta_link.is_none());
+    }
+
+    #[test]
+    fn test_graph_response_with_delta_link() {
+        let json = r#"{
+            "value": [],
+            "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=abc"
+        }"#;
+
+        let response: GraphResponse<GraphMessage> = serde_json::from_str(json).expect("Failed to parse");
+        assert!(response.value.is_empty());
+        assert!(response.next_link.is_none());
+        assert!(response.delta_link.is_some());
+        assert!(response.delta_link.unwrap().contains("deltatoken"));
+    }
+
+    #[test]
+    fn test_graph_error_deserialization() {
+        let json = r#"{
+            "error": {
+                "code": "InvalidAuthenticationToken",
+                "message": "Access token has expired."
+            }
+        }"#;
+
+        let response: GraphErrorResponse = serde_json::from_str(json).expect("Failed to parse");
+        assert_eq!(response.error.code, "InvalidAuthenticationToken");
+        assert_eq!(response.error.message, "Access token has expired.");
+    }
+
+    #[test]
+    fn test_graph_base_url() {
+        assert_eq!(GRAPH_BASE_URL, "https://graph.microsoft.com/v1.0");
+    }
+
+    #[test]
+    fn test_page_size() {
+        assert_eq!(PAGE_SIZE, 50);
+    }
+}
