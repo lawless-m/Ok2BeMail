@@ -321,3 +321,239 @@ impl AuthManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AzureConfig, Config};
+
+    fn create_test_config(client_id: &str, tenant_id: &str) -> Config {
+        Config {
+            azure: AzureConfig {
+                client_id: client_id.to_string(),
+                tenant_id: tenant_id.to_string(),
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn test_auth_manager_creation() {
+        let config = create_test_config("test-client-id", "test-tenant-id");
+        let auth = AuthManager::new(&config);
+
+        assert_eq!(auth.client_id, "test-client-id");
+        assert_eq!(auth.tenant_id, "test-tenant-id");
+    }
+
+    #[test]
+    fn test_token_endpoint() {
+        let config = create_test_config("client-123", "tenant-456");
+        let auth = AuthManager::new(&config);
+
+        let endpoint = auth.token_endpoint();
+        assert_eq!(
+            endpoint,
+            "https://login.microsoftonline.com/tenant-456/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn test_device_code_endpoint() {
+        let config = create_test_config("client-123", "tenant-456");
+        let auth = AuthManager::new(&config);
+
+        let endpoint = auth.device_code_endpoint();
+        assert_eq!(
+            endpoint,
+            "https://login.microsoftonline.com/tenant-456/oauth2/v2.0/devicecode"
+        );
+    }
+
+    #[test]
+    fn test_token_endpoint_with_different_tenants() {
+        let tenants = [
+            "common",
+            "organizations",
+            "consumers",
+            "my-specific-tenant-id",
+            "12345678-1234-1234-1234-123456789012",
+        ];
+
+        for tenant in tenants {
+            let config = create_test_config("client", tenant);
+            let auth = AuthManager::new(&config);
+
+            let endpoint = auth.token_endpoint();
+            assert!(endpoint.contains(tenant));
+            assert!(endpoint.starts_with("https://login.microsoftonline.com/"));
+            assert!(endpoint.ends_with("/oauth2/v2.0/token"));
+        }
+    }
+
+    #[test]
+    fn test_token_data_serialization() {
+        let token = TokenData {
+            access_token: "eyJ0eXAi...access".to_string(),
+            refresh_token: Some("eyJ0eXAi...refresh".to_string()),
+            expires_at: Utc::now() + Duration::hours(1),
+            token_type: "Bearer".to_string(),
+        };
+
+        let json = serde_json::to_string(&token).expect("Failed to serialize");
+        assert!(json.contains("eyJ0eXAi...access"));
+        assert!(json.contains("eyJ0eXAi...refresh"));
+        assert!(json.contains("Bearer"));
+    }
+
+    #[test]
+    fn test_token_data_deserialization() {
+        let json = r#"{
+            "access_token": "test-access-token",
+            "refresh_token": "test-refresh-token",
+            "expires_at": "2025-01-01T12:00:00Z",
+            "token_type": "Bearer"
+        }"#;
+
+        let token: TokenData = serde_json::from_str(json).expect("Failed to deserialize");
+        assert_eq!(token.access_token, "test-access-token");
+        assert_eq!(token.refresh_token, Some("test-refresh-token".to_string()));
+        assert_eq!(token.token_type, "Bearer");
+    }
+
+    #[test]
+    fn test_token_data_roundtrip() {
+        let original = TokenData {
+            access_token: "access-token-123".to_string(),
+            refresh_token: Some("refresh-token-456".to_string()),
+            expires_at: DateTime::parse_from_rfc3339("2025-06-15T10:30:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            token_type: "Bearer".to_string(),
+        };
+
+        let json = serde_json::to_string(&original).expect("Failed to serialize");
+        let deserialized: TokenData = serde_json::from_str(&json).expect("Failed to deserialize");
+
+        assert_eq!(deserialized.access_token, original.access_token);
+        assert_eq!(deserialized.refresh_token, original.refresh_token);
+        assert_eq!(deserialized.token_type, original.token_type);
+        assert_eq!(deserialized.expires_at, original.expires_at);
+    }
+
+    #[test]
+    fn test_token_data_without_refresh_token() {
+        let json = r#"{
+            "access_token": "only-access",
+            "refresh_token": null,
+            "expires_at": "2025-01-01T12:00:00Z",
+            "token_type": "Bearer"
+        }"#;
+
+        let token: TokenData = serde_json::from_str(json).expect("Failed to deserialize");
+        assert_eq!(token.access_token, "only-access");
+        assert!(token.refresh_token.is_none());
+    }
+
+    #[test]
+    fn test_graph_scopes() {
+        assert!(GRAPH_SCOPES.contains(&"Mail.Read"));
+        assert!(GRAPH_SCOPES.contains(&"offline_access"));
+        assert_eq!(GRAPH_SCOPES.len(), 2);
+    }
+
+    #[test]
+    fn test_token_file_path() {
+        let path = AuthManager::token_file_path();
+
+        // Should end with tokens.json
+        assert!(path.ends_with("tokens.json"));
+        // Should be in emailcl config directory
+        assert!(path.parent().unwrap().ends_with("emailcl"));
+    }
+
+    #[test]
+    fn test_device_code_response_deserialization() {
+        let json = r#"{
+            "device_code": "device123",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://microsoft.com/devicelogin",
+            "expires_in": 900,
+            "interval": 5
+        }"#;
+
+        let response: DeviceCodeResponse = serde_json::from_str(json).expect("Failed to deserialize");
+        assert_eq!(response.device_code, "device123");
+        assert_eq!(response.user_code, "ABCD-EFGH");
+        assert_eq!(response.verification_uri, "https://microsoft.com/devicelogin");
+        assert_eq!(response.expires_in, 900);
+        assert_eq!(response.interval, 5);
+    }
+
+    #[test]
+    fn test_token_response_deserialization() {
+        let json = r#"{
+            "access_token": "access123",
+            "refresh_token": "refresh456",
+            "expires_in": 3600,
+            "token_type": "Bearer"
+        }"#;
+
+        let response: TokenResponse = serde_json::from_str(json).expect("Failed to deserialize");
+        assert_eq!(response.access_token, "access123");
+        assert_eq!(response.refresh_token, Some("refresh456".to_string()));
+        assert_eq!(response.expires_in, 3600);
+        assert_eq!(response.token_type, "Bearer");
+    }
+
+    #[test]
+    fn test_error_response_deserialization() {
+        let json = r#"{
+            "error": "authorization_pending",
+            "error_description": "User has not completed authentication"
+        }"#;
+
+        let response: ErrorResponse = serde_json::from_str(json).expect("Failed to deserialize");
+        assert_eq!(response.error, "authorization_pending");
+        assert_eq!(
+            response.error_description,
+            Some("User has not completed authentication".to_string())
+        );
+    }
+
+    #[test]
+    fn test_error_response_without_description() {
+        let json = r#"{
+            "error": "expired_token"
+        }"#;
+
+        let response: ErrorResponse = serde_json::from_str(json).expect("Failed to deserialize");
+        assert_eq!(response.error, "expired_token");
+        assert!(response.error_description.is_none());
+    }
+
+    #[test]
+    fn test_token_expiry_check() {
+        // Token that expires in 10 minutes
+        let valid_token = TokenData {
+            access_token: "valid".to_string(),
+            refresh_token: None,
+            expires_at: Utc::now() + Duration::minutes(10),
+            token_type: "Bearer".to_string(),
+        };
+
+        // Token expires in more than 5 minutes, so it's valid
+        assert!(valid_token.expires_at > Utc::now() + Duration::minutes(5));
+
+        // Token that expires in 3 minutes (should trigger refresh)
+        let expiring_token = TokenData {
+            access_token: "expiring".to_string(),
+            refresh_token: None,
+            expires_at: Utc::now() + Duration::minutes(3),
+            token_type: "Bearer".to_string(),
+        };
+
+        // Token expires in less than 5 minutes, so it should be refreshed
+        assert!(expiring_token.expires_at <= Utc::now() + Duration::minutes(5));
+    }
+}
