@@ -1,0 +1,62 @@
+[package]
+name = "emailcl"
+version = "0.1.0"
+edition = "2021"
+description = "Email classifier with local LLM analysis"
+authors = ["Email Classifier Team"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# OAuth2
+oauth2 = "4"
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# HTML to text
+html2text = "0.12"
+
+# Notifications (cross-platform)
+notify-rust = "4"
+
+# Directories
+dirs = "5"
+
+# Chrono for datetime handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Keyring for secure token storage
+keyring = "3"
+
+# URL encoding
+urlencoding = "2"
+
+# Futures utilities
+futures = "0.3"
+
+[[bin]]
+name = "emailcl"
+path = "src/main.rs"
